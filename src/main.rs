@@ -1,5 +1,4 @@
 use alloy_primitives::{Bytes, B256};
-use clap::Parser;
 use futures::future::join_all;
 use jsonrpsee::{
     core::{async_trait, RpcResult},
@@ -7,7 +6,7 @@ use jsonrpsee::{
     tracing::{error, info, warn},
     types::ErrorObject,
 };
-use reth::{chainspec::EthereumChainSpecParser, cli::Cli};
+use reth::cli::Cli;
 use reth_node_ethereum::EthereumNode;
 use reth_primitives::TransactionSigned;
 use reth_private_transaction::{Builder, BuilderKind};
@@ -15,7 +14,7 @@ use reth_rpc_eth_types::utils::recover_raw_transaction;
 use strum::IntoEnumIterator;
 
 fn main() {
-    Cli::<EthereumChainSpecParser>::parse()
+    Cli::parse_args()
         .run(|builder, _| async move {
             let handle = builder
                 .node(EthereumNode::default())
@@ -27,7 +26,7 @@ fn main() {
                 })
                 .launch()
                 .await?;
-            handle.wait_for_node_exit().await
+            handle.node_exit_future.await
         })
         .unwrap();
 }
@@ -73,7 +72,10 @@ impl EthPrivateTransaction {
         let mut builders = Vec::new();
         for kind in BuilderKind::iter() {
             match kind.builder() {
-                Ok(builder) => builders.push(builder),
+                Ok(builder) => {
+                    info!(target: "builder", "Sending tx to builder: {}", kind);
+                    builders.push(builder);
+                }
                 Err(e) => warn!(target: "builder", "Failed to create builder for {}: {}", kind, e),
             }
         }

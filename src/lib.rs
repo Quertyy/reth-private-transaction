@@ -1,17 +1,13 @@
 use alloy_primitives::Bytes;
-use jsonrpsee::{
-    core::{client::ClientT, traits::ToRpcParams},
-    http_client::{HttpClient, HttpClientBuilder},
-    tracing::{info, trace, warn},
-};
-use serde::Serialize;
-use serde_json::{value::RawValue, Value};
+use jsonrpsee::tracing::{info, trace, warn};
+use reqwest::Client;
+use serde_json::{json, Value};
 use strum::{Display, EnumIter};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuilderError {
     #[error("HTTP client error: {0}")]
-    ClientError(#[from] jsonrpsee::core::ClientError),
+    ClientError(#[from] reqwest::Error),
     #[error("Invalid response from builder: {0}")]
     InvalidResponse(Value),
 }
@@ -55,47 +51,53 @@ impl BuilderKind {
 
     pub fn builder(&self) -> Result<Builder, BuilderError> {
         let endpoint = self.endpoint();
-        let client = HttpClientBuilder::default()
-            .max_request_size(10 * 1024 * 1024) // 10MB
-            .build(endpoint.url)?;
+        let client = Client::builder()
+            .build()
+            .map_err(BuilderError::ClientError)?;
 
         Ok(Builder {
             client,
-            rpc_method: endpoint.rpc_method,
+            endpoint,
             kind: self.clone(),
         })
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct TxRequest {
-    pub tx: Bytes,
-}
-
-impl ToRpcParams for TxRequest {
-    fn to_rpc_params(self) -> Result<Option<Box<RawValue>>, serde_json::Error> {
-        let json_value = serde_json::to_value(&self)?;
-        let raw_value = RawValue::from_string(json_value.to_string())?;
-        Ok(Some(raw_value))
-    }
-}
-
 pub struct Builder {
-    client: HttpClient,
-    rpc_method: String,
+    client: Client,
+    endpoint: BuilderEndpoint,
     kind: BuilderKind,
 }
 
 impl Builder {
     pub async fn send_tx(&self, tx: Bytes) -> Result<(), BuilderError> {
-        let params = TxRequest { tx };
-        trace!(target: "builder", ?params, "Sending tx to builder: {}", self.kind);
-        let response: Value = self.client.request(&self.rpc_method, params).await?;
-        if response.get("error").is_some() {
-            warn!(target: "builder", ?response, "Builder returned error response: {}", self.kind);
-            return Err(BuilderError::InvalidResponse(response));
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "method": &self.endpoint.rpc_method,
+            "params": [{
+                "tx": tx
+            }],
+            "id": 1
+        });
+
+        trace!(target: "builder", ?payload, "Sending tx to builder: {}", self.kind);
+
+        let response = self
+            .client
+            .post(&self.endpoint.url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(BuilderError::ClientError)?;
+
+        let response_body: Value = response.json().await.map_err(BuilderError::ClientError)?;
+
+        if response_body.get("error").is_some() {
+            warn!(target: "builder", ?response_body, "Builder returned an error: {}", self.kind);
+            return Err(BuilderError::InvalidResponse(response_body));
         }
-        info!(target: "builder", ?response, "Tx successfully submitted to builder: {}", self.kind);
+
+        info!(target: "builder", ?response_body, "Tx sent successfully to builder: {}", self.kind);
         Ok(())
     }
 }
